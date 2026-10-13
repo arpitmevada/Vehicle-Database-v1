@@ -11,7 +11,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image
 
-from core import build_excel, load_image, prep_photo, split_chunks
+from core import build_excel, prep_photo, split_chunks, stamp_photo
 
 st.set_page_config(page_title="Vehicle Photo Capture", page_icon="🚚", layout="centered")
 
@@ -23,14 +23,18 @@ _picker = components.declare_component(
     "photo_picker", path=str(Path(__file__).parent / "photo_picker"))
 
 
-def get_photo(label, key, fallback):
-    if fallback:
-        f = st.file_uploader(label, type=["jpg", "jpeg", "png"], key=key)
-        return load_image(f) if f else None
+def get_photo(label, key):
     v = _picker(label=label, max_side=1000, quality=0.75, key=key, default=None)
     if v and v.get("b64"):
-        return Image.open(io.BytesIO(base64.b64decode(v["b64"]))).convert("RGB")
+        return Image.open(io.BytesIO(base64.b64decode(v["b64"]))).convert("RGB"), v
     return None
+
+
+def final_image(key, item, rot):
+    img, meta = item
+    if key == "VIN" and rot:
+        img = img.rotate(rot, expand=True)
+    return stamp_photo(img, meta)
 
 
 def check_password():
@@ -88,17 +92,22 @@ if not check_password():
 tab_add, tab_db = st.tabs(["Add new set", "Database"])
 
 with tab_add:
-    st.caption("Upload the 4 photos and tap Save. Photos go into Excel as they are (no cropping, no AI).")
+    st.caption("Take the 4 photos with the camera (allow Location when asked). Date, time and location are printed on each photo.")
     n = st.session_state.setdefault("nonce", 0)
-    fallback = st.checkbox("Photo picker not working? Use standard uploader (no phone-side resize)")
     up = {
-        "VIN": get_photo("1. VIN plate photo", f"vin{n}", fallback),
-        "HRS": get_photo("2. Hours (HRS) photo", f"hrs{n}", fallback),
-        "ODO": get_photo("3. Odometer (km) photo", f"odo{n}", fallback),
-        "FRONT": get_photo("4. Front of truck photo", f"front{n}", fallback),
+        "VIN": get_photo("1. VIN plate photo", f"vin{n}"),
+        "HRS": get_photo("2. Hours (HRS) photo", f"hrs{n}"),
+        "ODO": get_photo("3. Odometer (km) photo", f"odo{n}"),
+        "FRONT": get_photo("4. Front of truck photo", f"front{n}"),
     }
     rot = st.selectbox("Rotate VIN photo (use 270 if the plate appears sideways)", [0, 90, 180, 270],
                        index=3, key=f"rot{n}")
+
+    if any(v is not None for v in up.values()):
+        with st.expander("Preview with stamp", expanded=False):
+            for k, item in up.items():
+                if item is not None:
+                    st.image(final_image(k, item, rot), caption=k, width=260)
 
     with st.expander("Optional: type values and a vehicle reference (makes Excel searchable)"):
         ref = st.text_input("Vehicle ref / plate", key=f"ref{n}")
@@ -112,8 +121,8 @@ with tab_add:
             rid = now.strftime("%Y%m%d%H%M%S%f")[:17]
             data, imgs = get_sheets()
             rows = []
-            for key, f in up.items():
-                b64 = prep_photo(f, rotate=rot if key == "VIN" else 0)
+            for key, item in up.items():
+                b64 = prep_photo(final_image(key, item, rot))
                 for seq, chunk in enumerate(split_chunks(b64)):
                     rows.append([rid, key, seq, chunk])
             imgs.append_rows(rows, value_input_option="RAW")
