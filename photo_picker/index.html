@@ -6,26 +6,31 @@
 <style>
   body { margin: 0; font-family: "Source Sans Pro", Arial, sans-serif; color: #31333F; }
   .box { border: 1px solid #d0d3da; border-radius: 8px; padding: 10px 12px; background: #f7f8fa; }
-  .label { font-size: 15px; margin-bottom: 6px; font-weight: 600; }
-  input[type=file] { font-size: 15px; width: 100%; }
-  .msg { font-size: 13px; margin-top: 6px; color: #555; }
-  .ok { color: #1a7f37; }
-  img { max-width: 100%; max-height: 140px; margin-top: 6px; border-radius: 4px; display: block; }
+  .label { font-size: 15px; margin-bottom: 8px; font-weight: 600; }
+  .btn { display: block; text-align: center; padding: 12px 8px; border-radius: 8px; border: 1px solid #ff4b4b;
+         background: #ff4b4b; color: #fff; font-size: 16px; cursor: pointer; }
+  input[type=file] { display: none; }
+  .msg { font-size: 13px; margin-top: 8px; color: #555; }
+  .ok { color: #1a7f37; } .warn { color: #b35c00; }
+  img { max-width: 100%; max-height: 120px; margin-top: 6px; border-radius: 4px; display: block; }
   @media (prefers-color-scheme: dark) {
     body { color: #fafafa; } .box { background: #1e2129; border-color: #3a3f4b; } .msg { color: #bbb; }
-    .ok { color: #4ade80; }
+    .ok { color: #4ade80; } .warn { color: #fbbf24; }
   }
 </style>
 </head>
 <body>
 <div class="box">
   <div class="label" id="label">Photo</div>
-  <input type="file" id="file" accept="image/*">
-  <div class="msg" id="msg">Choose a photo. It is shrunk on your phone before upload.</div>
+  <label class="btn">&#128247; Take photo
+    <input type="file" id="file_cam" accept="image/*" capture="environment">
+  </label>
+  <div class="msg" id="msg">Tap to open the camera. Photo is shrunk on your phone before upload.</div>
   <img id="thumb" style="display:none">
 </div>
 <script>
   let maxSide = 1000, quality = 0.75;
+  const placeCache = {};
   function send(type, extra) {
     window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, extra || {}), "*");
   }
@@ -41,6 +46,37 @@
     }
   });
 
+  function getGeo() {
+    return new Promise(function (res) {
+      if (!navigator.geolocation) return res(null);
+      navigator.geolocation.getCurrentPosition(
+        function (p) { res({ lat: p.coords.latitude, lon: p.coords.longitude, acc: Math.round(p.coords.accuracy) }); },
+        function () { res(null); },
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 30000 });
+    });
+  }
+  async function placeName(g) {
+    if (!g) return "";
+    const k = g.lat.toFixed(3) + "," + g.lon.toFixed(3);
+    if (placeCache[k] !== undefined) return placeCache[k];
+    let out = "";
+    try {
+      const c = new AbortController(), t = setTimeout(function () { c.abort(); }, 4000);
+      const r = await fetch("https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=16&accept-language=en&lat=" +
+        g.lat + "&lon=" + g.lon, { signal: c.signal });
+      clearTimeout(t);
+      const a = (await r.json()).address || {};
+      out = [a.neighbourhood || a.suburb || a.hamlet || a.village || a.road,
+             a.city || a.town || a.county || a.state_district].filter(Boolean).join(", ");
+    } catch (err) { out = ""; }
+    placeCache[k] = out;
+    return out;
+  }
+  function nowIST() {
+    const s = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric",
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true }).format(new Date());
+    return s.replace(/\bam\b/, "AM").replace(/\bpm\b/, "PM");
+  }
   function loadBitmap(file) {
     if (window.createImageBitmap) {
       return createImageBitmap(file, { imageOrientation: "from-image" }).catch(function () { return viaImg(file); });
@@ -50,40 +86,46 @@
   function viaImg(file) {
     return new Promise(function (res, rej) {
       const url = URL.createObjectURL(file), im = new Image();
-      im.onload = function () { res(im); };
-      im.onerror = rej;
-      im.src = url;
+      im.onload = function () { res(im); }; im.onerror = rej; im.src = url;
     });
   }
   function kb(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.round(n / 1024) + " KB"; }
 
-  document.getElementById("file").addEventListener("change", async function (ev) {
+  document.getElementById("file_cam").addEventListener("change", async function (ev) {
     const file = ev.target.files[0];
     const msg = document.getElementById("msg");
     if (!file) return;
-    msg.className = "msg"; msg.textContent = "Shrinking photo..."; setHeight();
+    const capturedAt = nowIST();
+    msg.className = "msg"; msg.textContent = "Shrinking photo and reading location..."; setHeight();
     try {
+      const geoP = getGeo();
       const bmp = await loadBitmap(file);
-      const w0 = bmp.width, h0 = bmp.height;
-      const s = Math.min(1, maxSide / Math.max(w0, h0));
-      const w = Math.round(w0 * s), h = Math.round(h0 * s);
+      const s = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
+      const w = Math.round(bmp.width * s), h = Math.round(bmp.height * s);
       const c = document.createElement("canvas"); c.width = w; c.height = h;
       c.getContext("2d").drawImage(bmp, 0, 0, w, h);
       const dataUrl = c.toDataURL("image/jpeg", quality);
       const b64 = dataUrl.split(",")[1];
       const newBytes = Math.round(b64.length * 0.75);
+      const g = await geoP;
+      const place = await placeName(g);
       const th = document.getElementById("thumb"); th.src = dataUrl; th.style.display = "block";
-      msg.className = "msg ok";
-      msg.textContent = "Ready: " + kb(file.size) + " \u2192 " + kb(newBytes) + " (" + w + "\u00d7" + h + ")";
-      send("streamlit:setComponentValue", { value: { name: file.name, b64: b64, w: w, h: h, orig_bytes: file.size, new_bytes: newBytes }, dataType: "json" });
+      msg.className = g ? "msg ok" : "msg warn";
+      msg.textContent = "Ready: " + kb(file.size) + " \u2192 " + kb(newBytes) +
+        (g ? " \u00b7 location added" : " \u00b7 location NOT available (allow location for this site)");
+      send("streamlit:setComponentValue", { value: {
+        name: file.name, b64: b64, w: w, h: h, orig_bytes: file.size, new_bytes: newBytes,
+        captured_at: capturedAt, lat: g ? g.lat : null, lon: g ? g.lon : null, acc: g ? g.acc : null, place: place
+      }, dataType: "json" });
       setHeight();
     } catch (err) {
-      msg.textContent = "Could not read this photo. Try another, or use the standard uploader."; setHeight();
+      msg.className = "msg warn"; msg.textContent = "Could not read this photo. Please take it again."; setHeight();
     }
   });
 
   send("streamlit:componentReady", { apiVersion: 1 });
   setHeight();
+  getGeo();  // asks for location permission early
 </script>
 </body>
 </html>
